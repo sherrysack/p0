@@ -7,128 +7,182 @@ a new goroutine to handle that request.
 */
 import (
 	"bufio"
-	"errors"
 	"fmt"
 	"net"
 	"strconv"
 )
 
-var CloseInterrupt = errors.New("Closing server")
 type multiEchoServer struct {
 	// TODO: implement this!
-	mq []chan string
-	close chan error
-	cnt int
-	clients chan map[int]*client
-	ln      *net.TCPListener
+	//mq []chan s
+	//close chan error
+	clients map[int]*client
+	ln *net.TCPListener
 	broadChan chan []byte
+	cnt int
 
 }
-
 
 type client struct {
 	id int
 	conn *net.TCPConn
-
-	recvChan chan []byte
-	sendChan chan []byte
+	//used to store the msg received
+	recvChan chan[] byte
+	//used to store the msg sent
+	sendChan chan[] byte
 	server *multiEchoServer
 	toCloseRecv chan int
 	toCloseSend chan int
 }
 
-func handleConnection(c net.Conn, mes *multiEchoServer) error {
-	fmt.Printf("Serving %s\n", c.RemoteAddr().String())
-	idx := len(mes.mq)
-	mes.mq = append(mes.mq, make(chan string, 100))
-	for {
-		netData, err:= bufio.NewReader(c).ReadString('\n')
-		if err != nil {
-			fmt.Println(err)
-			mes.cnt -= 1
-			return err
-		}
-		for _, ele := range mes.mq {
-			ele<-netData
-		}
-		go print(c, mes.mq[idx])
-
-	}
-
-	c.Close()
-	return nil
-}
-
-
-func print(c net.Conn, msg chan string) bool {
-	for {
-		line, err:= <-msg
-		if err {
-			return err
-		}
-		c.Write([]byte(line))
-	}
-	return true
-
-}
-
 // New creates and returns (but does not start) a new MultiEchoServer.
 func New() MultiEchoServer {
 	// TODO: implement this!
-
-	return &multiEchoServer{
-
-		mq:    make([]chan string, 1),
-		close: make(chan error),
-		cnt:   0,
-
-
-	}
+	s := &multiEchoServer{
+		cnt: 0,
+		clients:     make(map[int]*client),
+		broadChan:   make(chan []byte, 1)}
+	//s.clients <- make(map[int]*client, 1)
+	return s
 }
+
+
 
 func (mes *multiEchoServer) Start(port int) error {
 	// TODO: implement this!
-	PORT := ":" + strconv.Itoa(port)
+	PORT := ":"+strconv.Itoa(port)
 	addr, err := net.ResolveTCPAddr("tcp", PORT)
 	if err != nil {
 		return err
 	}
-	l, err := net.ListenTCP("tcp", addr)
+	mes.ln, err = net.ListenTCP("tcp", addr)
 	if err != nil {
+		fmt.Println(err)
 		return err
 	}
-	defer l.Close()
-	//enable multiple servers
 	go func() {
 		for {
-			fmt.Println("I am waiting")
-			c, err := l.Accept()
+			conn, err := mes.ln.AcceptTCP()
 			if err != nil {
-				fmt.Println("I have error")
 				fmt.Println(err)
+				return
 			}
-			fmt.Println("I am free")
-			closeErr := <-mes.close
-			if closeErr != nil {
-				return closeErr
+			c := &client{
+				id: mes.cnt,
+				conn: conn,
+				recvChan: make(chan []byte, 1),
+				sendChan: make(chan []byte, 10000),
+				toCloseSend: make(chan int, 1),
+				toCloseRecv: make(chan int, 1),
+				server: mes,
 			}
-			mes.cnt += 1
-			go handleConnection(c, mes)
+			mes.cnt++
+			//update the map for the
+
+			mes.clients[c.id] = c
+			//cli := <-mes.clients
+			//cli[c.id] = c
+			//mes.clients<-cli
+
+
+
+			go c.recvLoop()
+			go c.sendLoop()
 		}
+
 	}()
+	go mes.broadCastLoop()
+	return nil
+
+}
+
+func (c *client) recvLoop() {
+	br := bufio.NewReader(c.conn)
+	for {
+		msg, err := br.ReadBytes('\n')
+		if err != nil {
+			c.toCloseRecv <- 1
+			return
+		}
+		select {
+		case c.server.broadChan <- []byte(msg):
+			break
+		//if the server shuts down, then the server stops reading the message from
+		//the client
+		case <- c.toCloseSend:
+			c.toCloseRecv <- 1
+			return
+		}
+
+	}
+}
 
 
+func (c *client) sendLoop() {
+	for {
+		select {
+		case data, ok := <-c.sendChan:
+			if !ok {
+				return
+			}
+			_, err := c.conn.Write(data)
+			if err != nil {
+				return
+			}
+			//stop sending msg to this client, delete the client
+			//from the map, so the server stops broadcasting msg
+			//to client
+		case <- c.toCloseRecv:
 
+			delete(c.server.clients, c.id)
+			//cli :=<- c.server.clients
+			//delete(cli, c.id)
+			//c.server.clients <- cli
+			return
+		}
+
+	}
+}
+
+func (mes *multiEchoServer) broadCastLoop() {
+	for {
+		select {
+		case data, ok :=<- mes.broadChan:
+			if !ok {
+				return
+			}
+			cli := mes.clients
+			//cli :=<- mes.clients
+			for _, c := range cli {
+				select {
+				case c.sendChan <- data:
+					break
+				default:
+					break
+				}
+			}
+			mes.clients = cli
+		}
+	}
 }
 
 func (mes *multiEchoServer) Close() {
 	// TODO: implement this!
+	mes.ln.Close()
+	cli := mes.clients
+	for _, c := range cli {
+		c.conn.Close()
+		c.toCloseSend <- 1
+	}
+	mes.clients = cli
+	close(mes.broadChan)
 
 }
 
 func (mes *multiEchoServer) Count() int {
 	// TODO: implement this!
-	return mes.cnt
+
+	return len(mes.clients)
 }
 
 // TODO: add additional methods/functions below!
